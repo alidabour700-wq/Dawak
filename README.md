@@ -1,0 +1,1 @@
+# Dawak - Medication Management App\n\nA professional medical-style application for medication management and reminders.\n\n## Features\n- Patient Dashboard\n- Medication Reminders\n- Caregiver Dashboard\n- Medical Design System
