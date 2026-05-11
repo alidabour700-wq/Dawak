@@ -1,11 +1,11 @@
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { 
   Home as HomeIcon, CalendarDays, Plus, Bell, Settings as SettingsIcon,
   CheckCircle2, Circle, Clock, ChevronRight, MessageCircle, Star,
   ShieldCheck, LogOut, Globe, Phone, Pill, Heart, Watch, Stethoscope, 
   Lock, AlertCircle, UserCircle2, Sun, Cloud, Moon, Battery, X, Send, HeartPulse,
-  Bluetooth, RefreshCw, Wifi, Zap
+  Bluetooth, RefreshCw, Wifi, Zap, Trash2, Barcode, Camera, Loader, XCircle
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -15,6 +15,21 @@ import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 
 type Screen = 'onboarding' | 'login' | 'home' | 'schedule' | 'add' | 'notifications' | 'chat' | 'settings' | 'subscription' | 'devices';
+
+// Real medication type
+interface RealMed {
+  id: string;
+  name: string;
+  dosage: string;
+  frequency: number;
+  pillsInBox: number;
+  pillsRemaining: number;
+  periods: string[];
+  reminderEnabled: boolean;
+  status: 'active' | 'paused';
+  createdAt: Date;
+  lastTaken?: Date;
+}
 
 const MOCK_MEDS = [
   { id: 1, name: "باراسيتامول ٥٠٠ مج", time: "٠٨:٠٠ ص", status: 'taken', period: 'morning', type: "pill" },
@@ -26,27 +41,65 @@ const MOCK_MEDS = [
 
 export default function PatientApp() {
   const [currentScreen, setCurrentScreen] = useState<Screen>('onboarding');
-  const [meds, setMeds] = useState(MOCK_MEDS);
+  const [meds, setMeds] = useState<RealMed[]>([]);
   const [language, setLanguage] = useState<'ar' | 'en'>('ar');
   const [isPremium, setIsPremium] = useState(false);
   const [wearableNotif, setWearableNotif] = useState(false);
+  const [medLoading, setMedLoading] = useState(true);
 
-  const toggleMedStatus = (id: number) => {
-    setMeds(meds.map(med => {
-      if (med.id === id) {
-        let newStatus = med.status;
-        if (med.status === 'taken') newStatus = 'upcoming';
-        else if (med.status === 'upcoming') { newStatus = 'taken'; }
-        else if (med.status === 'missed') { newStatus = 'taken'; }
-        if (newStatus === 'taken' && med.status !== 'taken') {
-          setWearableNotif(true);
-          setTimeout(() => setWearableNotif(false), 3000);
-        }
-        return { ...med, status: newStatus };
+  // Load medications from real service
+  useEffect(() => {
+    loadMedications();
+  }, []);
+
+  const loadMedications = useCallback(() => {
+    setMedLoading(true);
+    try {
+      // Import dynamically to avoid issues
+      import('@/services/medicationService').then(module => {
+        const allMeds = module.getAllMedications();
+        // Map to simplified format
+        setMeds(allMeds.map((m: any) => ({
+          id: m.id,
+          name: m.name,
+          dosage: m.dosage,
+          frequency: m.frequency,
+          pillsInBox: m.pillsInBox,
+          pillsRemaining: m.pillsRemaining,
+          periods: m.periods,
+          reminderEnabled: m.reminderEnabled,
+          status: m.status,
+          createdAt: m.createdAt,
+          lastTaken: m.lastTaken
+        })));
+        setMedLoading(false);
+      }).catch(() => {
+        setMeds([]);
+        setMedLoading(false);
+      });
+    } catch (e) {
+      setMeds([]);
+      setMedLoading(false);
+    }
+  }, []);
+
+  const toggleMedStatus = (id: string) => {
+    import('@/services/medicationService').then(module => {
+      const result = module.markDoseAsTaken(id);
+      if (result.success) {
+        setWearableNotif(true);
+        setTimeout(() => setWearableNotif(false), 3000);
+        loadMedications();
       }
-      return med;
-    }));
+    });
   };
+
+  const deleteMedication = useCallback((id: string) => {
+    import('@/services/medicationService').then(module => {
+      module.pauseMedication(id);
+      loadMedications();
+    });
+  }, [loadMedications]);
 
   const renderScreen = () => {
     switch (currentScreen) {
@@ -55,11 +108,11 @@ export default function PatientApp() {
       case 'login':
         return <LoginScreen onLogin={() => setCurrentScreen('home')} />;
       case 'home':
-        return <HomeScreen meds={meds} onToggle={toggleMedStatus} onGoPremium={() => setCurrentScreen('subscription')} />;
+        return <HomeScreen meds={meds} onToggle={toggleMedStatus} onDelete={deleteMedication} onGoPremium={() => setCurrentScreen('subscription')} loading={medLoading} />;
       case 'schedule':
-        return <ScheduleScreen meds={meds} onToggle={toggleMedStatus} />;
+        return <ScheduleScreen meds={meds} onToggle={toggleMedStatus} onDelete={deleteMedication} loading={medLoading} />;
       case 'add':
-        return <AddMedicationScreen onBack={() => setCurrentScreen('home')} />;
+        return <AddMedicationScreen onBack={() => { setCurrentScreen('home'); loadMedications(); }} />;
       case 'notifications':
         return <NotificationsScreen />;
       case 'chat':
@@ -281,10 +334,10 @@ function LoginScreen({ onLogin }: { onLogin: () => void }) {
   );
 }
 
-function HomeScreen({ meds, onToggle, onGoPremium, onGoChat, onGoDevices }: any) {
-  const takenCount = meds.filter((m:any) => m.status === 'taken').length;
-  const progress = Math.round((takenCount / meds.length) * 100) || 0;
-  const missedMeds = meds.filter((m:any) => m.status === 'missed');
+function HomeScreen({ meds, onToggle, onDelete, onGoPremium, onGoChat, onGoDevices, loading }: any) {
+  const takenCount = meds.filter((m:any) => m.status === 'active').length;
+  const progress = meds.length > 0 ? Math.round((takenCount / meds.length) * 100) : 0;
+  const activeMeds = meds.filter((m:any) => m.status === 'active');
   
   const options = { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' };
   const todayStr = new Date().toLocaleDateString('ar-EG', options as any);
@@ -420,7 +473,7 @@ function HomeScreen({ meds, onToggle, onGoPremium, onGoChat, onGoDevices }: any)
               </h4>
               <div className="space-y-3 pl-2">
                 {periodMeds.map((med:any) => (
-                  <MedCard key={med.id} med={med} onToggle={() => onToggle(med.id)} />
+                  <MedCard key={med.id} med={med} onToggle={() => onToggle(med.id)} onDelete={onDelete ? () => onDelete(med.id) : undefined} />
                 ))}
               </div>
             </div>
@@ -456,17 +509,24 @@ function HomeScreen({ meds, onToggle, onGoPremium, onGoChat, onGoDevices }: any)
   );
 }
 
-function MedCard({ med, onToggle }: { med: any, onToggle: () => void }) {
-  const isTaken = med.status === 'taken';
-  const isMissed = med.status === 'missed';
+function MedCard({ med, onToggle, onDelete }: { med: any, onToggle: () => void, onDelete?: () => void }) {
+  const isActive = med.status === 'active';
   const [justTaken, setJustTaken] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
   const handleToggle = () => {
-    if (!isTaken) {
+    if (isActive) {
       setJustTaken(true);
       setTimeout(() => setJustTaken(false), 800);
     }
     onToggle();
+  };
+
+  const handleDelete = () => {
+    if (onDelete) {
+      onDelete();
+      setShowDeleteConfirm(false);
+    }
   };
 
   return (
@@ -476,9 +536,8 @@ function MedCard({ med, onToggle }: { med: any, onToggle: () => void }) {
       transition={{ duration: 0.4 }}
     >
       <Card className={`transition-all overflow-hidden border-2 ${
-        isTaken ? 'bg-gray-50 border-gray-100' : 
-        isMissed ? 'bg-red-50 border-red-200' : 
-        'bg-white border-gray-200 shadow-md'
+        isActive ? 'bg-white border-gray-200 shadow-md' : 
+        'bg-gray-50 border-gray-100'
       }`}>
         <CardContent className="p-0">
           <div className="p-4 flex items-center gap-4">
@@ -486,14 +545,13 @@ function MedCard({ med, onToggle }: { med: any, onToggle: () => void }) {
               onClick={handleToggle}
               whileTap={{ scale: 0.88 }}
               className={`flex-shrink-0 w-14 h-14 rounded-full flex items-center justify-center transition-all shadow-sm ${
-                isTaken ? 'bg-emerald-500 text-white' : 
-                isMissed ? 'bg-red-100 text-red-500 hover:bg-red-200' : 
-                'bg-gray-100 text-gray-400 hover:bg-gray-200'
+                isActive ? 'bg-gray-100 text-gray-400 hover:bg-gray-200' : 
+                'bg-emerald-500 text-white'
               }`}
               data-testid={`btn-toggle-med-${med.id}`}
             >
               <AnimatePresence mode="wait">
-                {isTaken ? (
+                {!isActive ? (
                   <motion.div key="check" initial={{ scale: 0, rotate: -90 }} animate={{ scale: 1, rotate: 0 }} exit={{ scale: 0 }} transition={{ duration: 0.25 }}>
                     <CheckCircle2 className="w-8 h-8" />
                   </motion.div>
@@ -506,17 +564,28 @@ function MedCard({ med, onToggle }: { med: any, onToggle: () => void }) {
             </motion.button>
             
             <div className="flex-1">
-              <h4 className={`font-bold text-lg ${isTaken ? 'text-gray-400 line-through' : 'text-gray-900'}`}>
+              <h4 className={`font-bold text-lg ${!isActive ? 'text-gray-400 line-through' : 'text-gray-900'}`}>
                 {med.name}
               </h4>
               <div className="flex items-center gap-2 mt-1">
-                <p className={`text-base font-bold ${isTaken ? 'text-gray-400' : isMissed ? 'text-red-600' : 'text-emerald-600'}`}>
-                  {med.time}
+                <p className={`text-base font-bold ${isActive ? 'text-emerald-600' : 'text-gray-400'}`}>
+                  {med.dosage}
                 </p>
-                {isMissed && <Badge variant="destructive" className="text-xs px-2 py-0 h-5">متأخر</Badge>}
-                {isTaken && <Badge variant="outline" className="text-xs px-2 py-0 h-5 bg-emerald-50 border-emerald-200 text-emerald-600">✓ مكتمل</Badge>}
+                {!isActive && <Badge variant="outline" className="text-xs px-2 py-0 h-5 bg-emerald-50 border-emerald-200 text-emerald-600">✓ مكتمل</Badge>}
               </div>
             </div>
+
+            {/* Delete Button */}
+            {med.status === 'active' && onDelete && (
+              <motion.button 
+                onClick={() => setShowDeleteConfirm(true)}
+                whileTap={{ scale: 0.9 }}
+                className="flex-shrink-0 w-10 h-10 rounded-full flex items-center justify-center text-gray-300 hover:text-red-500 hover:bg-red-50 transition-colors"
+                data-testid={`btn-delete-med-${med.id}`}
+              >
+                <Trash2 className="w-5 h-5" />
+              </motion.button>
+            )}
 
             {justTaken && (
               <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="text-2xl">
@@ -525,19 +594,57 @@ function MedCard({ med, onToggle }: { med: any, onToggle: () => void }) {
             )}
           </div>
           
-          {(!isTaken) && (
-            <div className={`px-4 py-3 border-t flex justify-end ${isMissed ? 'bg-red-100/50' : 'bg-gray-50'}`}>
+          {med.status === 'active' && (
+            <div className={`px-4 py-3 border-t flex justify-end bg-gray-50`}>
               <motion.div whileTap={{ scale: 0.96 }} className="w-full">
                 <Button 
                   onClick={handleToggle} 
-                  className={`w-full h-12 rounded-xl font-bold text-lg ${
-                    isMissed ? 'bg-red-600 hover:bg-red-700 text-white' : 'bg-emerald-600 hover:bg-emerald-700 text-white'
-                  }`}
+                  className="w-full h-12 rounded-xl font-bold text-lg bg-emerald-600 hover:bg-emerald-700 text-white"
                 >
                   تسجيل الجرعة
                 </Button>
               </motion.div>
             </div>
+          )}
+          
+          {/* Delete Confirmation Modal */}
+          {showDeleteConfirm && (
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="absolute inset-0 bg-black/20 flex items-center justify-center p-4"
+              onClick={() => setShowDeleteConfirm(false)}
+            >
+              <motion.div 
+                initial={{ scale: 0.9 }}
+                animate={{ scale: 1 }}
+                className="bg-white rounded-2xl p-6 w-full shadow-2xl"
+                onClick={e => e.stopPropagation()}
+              >
+                <div className="text-center space-y-4">
+                  <div className="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center mx-auto">
+                    <AlertCircle className="w-8 h-8 text-red-600" />
+                  </div>
+                  <h4 className="font-bold text-xl text-gray-900">حذف medicamento؟</h4>
+                  <p className="text-gray-600 font-medium">هل أنت متأكد من حذف {med.name}؟</p>
+                  <div className="flex gap-3 pt-2">
+                    <Button 
+                      variant="outline"
+                      onClick={() => setShowDeleteConfirm(false)}
+                      className="flex-1 h-12 rounded-xl font-bold"
+                    >
+                      إلغاء
+                    </Button>
+                    <Button 
+                      onClick={handleDelete}
+                      className="flex-1 h-12 rounded-xl font-bold bg-red-600 hover:bg-red-700 text-white"
+                    >
+                      حذف
+                    </Button>
+                  </div>
+                </div>
+              </motion.div>
+            </motion.div>
           )}
         </CardContent>
       </Card>
@@ -608,6 +715,92 @@ function ScheduleScreen({ meds, onToggle }: any) {
 }
 
 function AddMedicationScreen({ onBack }: { onBack: () => void }) {
+  const [medicationName, setMedicationName] = useState("");
+  const [dosage, setDosage] = useState("");
+  const [frequency, setFrequency] = useState(2);
+  const [selectedPeriods, setSelectedPeriods] = useState<string[]>(["morning", "night"]);
+  const [pillsInBox, setPillsInBox] = useState(30);
+  const [reminderEnabled, setReminderEnabled] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [success, setSuccess] = useState(false);
+  const [scannerOpen, setScannerOpen] = useState(false);
+  const [showTimePicker, setShowTimePicker] = useState(false);
+  const [selectedTimes, setSelectedTimes] = useState<string[]>(["08:00", "20:00"]);
+
+  const togglePeriod = (period: string) => {
+    setSelectedPeriods(prev => 
+      prev.includes(period) 
+        ? prev.filter(p => p !== period) 
+        : [...prev, period]
+    );
+  };
+
+  const handleSaveMedication = async () => {
+    if (!medicationName.trim() || !dosage.trim()) {
+      alert("يرجى ملء جميع الحقول");
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const module = await import('@/services/medicationService');
+      module.addMedication(
+        medicationName,
+        dosage,
+        frequency,
+        pillsInBox,
+        selectedPeriods as any
+      );
+
+      setSuccess(true);
+      setTimeout(() => {
+        onBack();
+      }, 1500);
+    } catch (e) {
+      console.error("Error saving medication:", e);
+      alert("حدث خطأ في حفظ الدواء");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleBarcodeScan = (data: any) => {
+    setMedicationName(data.medicationName || "");
+    setDosage(data.dosage || "");
+    setPillsInBox(data.pillsPerBox || 30);
+    setScannerOpen(false);
+  };
+
+  if (success) {
+    return (
+      <motion.div
+        className="flex flex-col h-[100dvh] bg-white"
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+      >
+        <div className="bg-emerald-600 text-white p-4 pt-8 flex items-center gap-4 sticky top-0 z-10 rounded-b-3xl shadow-md">
+          <button onClick={onBack} className="w-12 h-12 flex items-center justify-center hover:bg-white/20 rounded-full transition-colors">
+            <ChevronRight className="w-8 h-8 rotate-180" />
+          </button>
+          <h1 className="text-2xl font-bold font-cairo">إضافة دواء جديد</h1>
+        </div>
+
+        <div className="flex-1 flex flex-col items-center justify-center p-6 space-y-6">
+          <motion.div
+            animate={{ scale: [1, 1.2, 1] }}
+            transition={{ duration: 0.6, repeat: 2 }}
+          >
+            <CheckCircle2 className="w-24 h-24 text-emerald-600" />
+          </motion.div>
+          <div className="text-center space-y-2">
+            <p className="text-2xl font-bold text-gray-900">تمت الإضافة!</p>
+            <p className="text-gray-600 font-medium">{medicationName} تمت إضافته بنجاح</p>
+          </div>
+        </div>
+      </motion.div>
+    );
+  }
+
   return (
     <div className="flex flex-col h-[100dvh] bg-white">
       <div className="bg-emerald-600 text-white p-4 pt-8 flex items-center gap-4 sticky top-0 z-10 rounded-b-3xl shadow-md">
@@ -619,21 +812,72 @@ function AddMedicationScreen({ onBack }: { onBack: () => void }) {
 
       <div className="p-6 space-y-8 flex-1 overflow-y-auto pb-32">
         
+        {/* Barcode Scanner Button */}
+        <motion.button
+          onClick={() => setScannerOpen(true)}
+          whileTap={{ scale: 0.98 }}
+          className="w-full h-16 rounded-2xl border-2 border-dashed border-emerald-500 bg-emerald-50 flex items-center justify-center gap-3 font-bold text-emerald-700 hover:bg-emerald-100 transition-colors"
+          data-testid="btn-scan-barcode"
+        >
+          <Barcode className="w-6 h-6" />
+          ماسح الرموز الضوئية
+        </motion.button>
+
+        {/* Scanned Info */}
+        {medicationName && dosage && (
+          <motion.div
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="bg-emerald-50 border-2 border-emerald-200 rounded-2xl p-4 space-y-2"
+          >
+            <p className="text-sm font-bold text-emerald-700">✓ تم مسح الرمز</p>
+            <p className="text-xs text-emerald-600">{medicationName} - {dosage}</p>
+          </motion.div>
+        )}
+        
         <div className="space-y-3">
           <label className="text-xl font-bold text-gray-900">اسم الدواء</label>
-          <Input placeholder="بحث عن دواء... (مثال: بانادول)" className="h-16 text-lg font-medium rounded-2xl bg-gray-50 border-2" data-testid="input-med-name" />
+          <Input 
+            value={medicationName}
+            onChange={(e) => setMedicationName(e.target.value)}
+            placeholder="بحث عن دواء... (مثال: بانادول)" 
+            className="h-16 text-lg font-medium rounded-2xl bg-gray-50 border-2" 
+            data-testid="input-med-name" 
+          />
         </div>
         
         <div className="space-y-3">
           <label className="text-xl font-bold text-gray-900">الجرعة</label>
-          <Input placeholder="مثال: حبة واحدة ٥٠٠ مج" className="h-16 text-lg font-medium rounded-2xl bg-gray-50 border-2" data-testid="input-med-dose" />
+          <Input 
+            value={dosage}
+            onChange={(e) => setDosage(e.target.value)}
+            placeholder="مثال: حبة واحدة ٥٠٠ مج" 
+            className="h-16 text-lg font-medium rounded-2xl bg-gray-50 border-2" 
+            data-testid="input-med-dose" 
+          />
+        </div>
+
+        <div className="space-y-3">
+          <label className="text-xl font-bold text-gray-900">عدد الأقراص في العلبة</label>
+          <Input 
+            type="number"
+            value={pillsInBox}
+            onChange={(e) => setPillsInBox(Math.max(1, parseInt(e.target.value) || 1))}
+            min="1"
+            className="h-16 text-lg font-medium rounded-2xl bg-gray-50 border-2" 
+          />
         </div>
 
         <div className="space-y-3">
           <label className="text-xl font-bold text-gray-900">التكرار اليومي</label>
           <div className="grid grid-cols-4 gap-3">
             {[1, 2, 3, 4].map(n => (
-              <Button key={n} variant="outline" className={`h-16 rounded-2xl border-2 text-lg font-bold ${n === 2 ? 'bg-emerald-50 border-emerald-600 text-emerald-700' : 'bg-white hover:bg-gray-50 text-gray-600'}`}>
+              <Button 
+                key={n} 
+                variant="outline" 
+                onClick={() => setFrequency(n)}
+                className={`h-16 rounded-2xl border-2 text-lg font-bold ${frequency === n ? 'bg-emerald-50 border-emerald-600 text-emerald-700' : 'bg-white hover:bg-gray-50 text-gray-600'}`}
+              >
                 {n}x
               </Button>
             ))}
@@ -643,18 +887,45 @@ function AddMedicationScreen({ onBack }: { onBack: () => void }) {
         <div className="space-y-3">
           <label className="text-xl font-bold text-gray-900">أوقات التذكير</label>
           <div className="grid grid-cols-3 gap-3">
-            <button className="h-24 rounded-2xl border-2 bg-amber-50 border-amber-400 flex flex-col items-center justify-center gap-2 text-amber-700">
+            <motion.button
+              onClick={() => togglePeriod("morning")}
+              whileTap={{ scale: 0.95 }}
+              className={`h-24 rounded-2xl border-2 flex flex-col items-center justify-center gap-2 transition-colors ${
+                selectedPeriods.includes("morning")
+                  ? "bg-amber-50 border-amber-400 text-amber-700"
+                  : "bg-gray-50 border-gray-200 text-gray-400"
+              }`}
+            >
               <Sun className="w-8 h-8" />
               <span className="font-bold text-sm">الصباح</span>
-            </button>
-            <button className="h-24 rounded-2xl border-2 bg-blue-50 border-blue-400 flex flex-col items-center justify-center gap-2 text-blue-700">
+              <span className="text-xs text-gray-500">صباحًا</span>
+            </motion.button>
+            <motion.button
+              onClick={() => togglePeriod("noon")}
+              whileTap={{ scale: 0.95 }}
+              className={`h-24 rounded-2xl border-2 flex flex-col items-center justify-center gap-2 transition-colors ${
+                selectedPeriods.includes("noon")
+                  ? "bg-blue-50 border-blue-400 text-blue-700"
+                  : "bg-gray-50 border-gray-200 text-gray-400"
+              }`}
+            >
               <Cloud className="w-8 h-8" />
               <span className="font-bold text-sm">الظهيرة</span>
-            </button>
-            <button className="h-24 rounded-2xl border-2 bg-gray-50 border-gray-200 flex flex-col items-center justify-center gap-2 text-gray-400">
+              <span className="text-xs text-gray-500">ظهرًا</span>
+            </motion.button>
+            <motion.button
+              onClick={() => togglePeriod("night")}
+              whileTap={{ scale: 0.95 }}
+              className={`h-24 rounded-2xl border-2 flex flex-col items-center justify-center gap-2 transition-colors ${
+                selectedPeriods.includes("night")
+                  ? "bg-indigo-50 border-indigo-400 text-indigo-700"
+                  : "bg-gray-50 border-gray-200 text-gray-400"
+              }`}
+            >
               <Moon className="w-8 h-8" />
               <span className="font-bold text-sm">المساء</span>
-            </button>
+              <span className="text-xs text-gray-500">مساءً</span>
+            </motion.button>
           </div>
         </div>
 
@@ -663,15 +934,83 @@ function AddMedicationScreen({ onBack }: { onBack: () => void }) {
             <h4 className="text-lg font-bold text-gray-900">تفعيل التذكير</h4>
             <p className="text-sm font-medium text-gray-500">تلقي إشعارات وقت الدواء</p>
           </div>
-          <Switch defaultChecked className="scale-125" />
+          <Switch checked={reminderEnabled} onCheckedChange={setReminderEnabled} className="scale-125" />
         </div>
       </div>
 
       <div className="p-6 bg-white border-t fixed bottom-0 left-0 right-0 w-full max-w-[390px] mx-auto shadow-[0_-10px_20px_rgba(0,0,0,0.05)]">
-        <Button className="w-full h-16 rounded-2xl text-xl font-bold bg-emerald-600 hover:bg-emerald-700 shadow-lg shadow-emerald-200" onClick={onBack} data-testid="btn-save-med">
-          حفظ الدواء
+        <Button 
+          className="w-full h-16 rounded-2xl text-xl font-bold bg-emerald-600 hover:bg-emerald-700 shadow-lg shadow-emerald-200" 
+          onClick={handleSaveMedication}
+          disabled={saving}
+          data-testid="btn-save-med"
+        >
+          {saving ? (
+            <span className="flex items-center gap-2">
+              <Loader className="w-5 h-5 animate-spin" />
+              جاري الحفظ...
+            </span>
+          ) : (
+            "حفظ الدواء"
+          )}
         </Button>
       </div>
+
+      {/* Barcode Scanner Modal */}
+      {scannerOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+          <motion.div 
+            initial={{ scale: 0.9 }}
+            animate={{ scale: 1 }}
+            className="bg-white rounded-3xl w-full max-w-md overflow-hidden shadow-2xl"
+          >
+            <div className="bg-emerald-600 text-white p-6 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <Camera className="w-6 h-6" />
+                <h2 className="text-xl font-bold font-cairo">ماسح الرموز</h2>
+              </div>
+              <button onClick={() => setScannerOpen(false)} className="w-10 h-10 rounded-full hover:bg-white/20 flex items-center justify-center">
+                <X className="w-6 h-6" />
+              </button>
+            </div>
+            <div className="p-6 space-y-6">
+              <div className="bg-gray-900 rounded-2xl overflow-hidden aspect-video flex items-center justify-center">
+                <div className="text-center text-white">
+                  <Camera className="w-16 h-16 mx-auto mb-2 opacity-50" />
+                  <p className="font-medium">كاميرا غير متاحة</p>
+                  <p className="text-sm opacity-50 mt-1">يمكن إدخال الرمز يدويًا</p>
+                </div>
+              </div>
+              <div className="space-y-3">
+                <Input 
+                  placeholder="أدخل رمز barcode..."
+                  className="h-14 text-center font-bold"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      // Simulate scan with input
+                      handleBarcodeScan({
+                        medicationName: "باراسيتامول ٥٠٠ مج",
+                        dosage: "٥٠٠ مج",
+                        pillsPerBox: 30
+                      });
+                    }
+                  }}
+                />
+                <Button 
+                  onClick={() => handleBarcodeScan({
+                    medicationName: "باراسيتامول ٥٠٠ مج",
+                    dosage: "٥٠٠ مج",
+                    pillsPerBox: 30
+                  })}
+                  className="w-full h-12 bg-emerald-600 hover:bg-emerald-700 text-white font-bold"
+                >
+                  مسح تجريبي
+                </Button>
+              </div>
+            </div>
+          </motion.div>
+        </div>
+      )}
     </div>
   );
 }
